@@ -21,8 +21,8 @@ var (
 	challenges = []map[string]interface{}{
 		{"level": 1, "flag": "WLUG{PHTE4568}", "points": 100},
 		{"level": 2, "flag": "WLUG{ARYP1589}", "points": 150},
-		{"level": 3, "flag": "flag{sql_mastery_achieved}", "points": 200},
-		{"level": 4, "flag": "flag{reverse_engineering}", "points": 250},
+		{"level": 3, "flag": "WLUG{HYGT5489}", "points": 200},
+		{"level": 4, "flag": "WLUG{AYVY2014}", "points": 250},
 		{"level": 5, "flag": "flag{crypto_beginner}", "points": 300},
 		{"level": 6, "flag": "flag{forensics_time}", "points": 350},
 		{"level": 7, "flag": "flag{pwn_it}", "points": 400},
