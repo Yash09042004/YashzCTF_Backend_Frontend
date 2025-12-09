@@ -19,8 +19,8 @@ var (
 	client     *mongo.Client
 	usersColl  *mongo.Collection
 	challenges = []map[string]interface{}{
-		{"level": 1, "flag": "flag{welcome_to_the_game}", "points": 100},
-		{"level": 2, "flag": "flag{docker_is_fun}", "points": 150},
+		{"level": 1, "flag": "WLUG{PHTE4568}", "points": 100},
+		{"level": 2, "flag": "WLUG{ARYP1589}", "points": 150},
 		{"level": 3, "flag": "flag{sql_mastery_achieved}", "points": 200},
 		{"level": 4, "flag": "flag{reverse_engineering}", "points": 250},
 		{"level": 5, "flag": "flag{crypto_beginner}", "points": 300},
