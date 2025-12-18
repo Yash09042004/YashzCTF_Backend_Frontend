@@ -6,7 +6,10 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"os/signal"
 	"strconv"
+	"sync"
+	"syscall"
 	"time"
 
 	"go.mongodb.org/mongo-driver/bson"
@@ -18,6 +21,20 @@ import (
 var (
 	client     *mongo.Client
 	usersColl  *mongo.Collection
+	
+	// Leaderboard caching with mutex for concurrent access
+	leaderboardCache     []map[string]interface{}
+	leaderboardCacheMux  sync.RWMutex
+	leaderboardCacheTime time.Time
+	
+	// User data prefetch cache for faster level loading
+	userPrefetchCache    map[string]*User
+	userPrefetchCacheMux sync.RWMutex
+	
+	// Challenge lookup map for O(1) access
+	challengeByLevel map[int]map[string]interface{}
+	challengeByFlag  map[string]map[string]interface{}
+	
 	challenges = []map[string]interface{}{
 		{"level": 1, "flag": "WLUG{PHTE4568}", "points": 100},
 		{"level": 2, "flag": "WLUG{ARYP1589}", "points": 150},
@@ -66,6 +83,79 @@ func getCurrentLevelForUser(user *User) int {
 	return max + 1
 }
 
+// initChallengeMaps creates lookup maps for O(1) challenge access
+func initChallengeMaps() {
+	challengeByLevel = make(map[int]map[string]interface{})
+	challengeByFlag = make(map[string]map[string]interface{})
+	
+	for _, c := range challenges {
+		level := c["level"].(int)
+		flag := c["flag"].(string)
+		challengeByLevel[level] = c
+		challengeByFlag[flag] = c
+	}
+}
+
+// prefetchUserData asynchronously fetches and caches user data
+func prefetchUserData(userId string) {
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+		defer cancel()
+		
+		var user User
+		err := usersColl.FindOne(ctx, bson.M{"username": userId}).Decode(&user)
+		if err != nil {
+			return // silently fail for prefetch
+		}
+		
+		userPrefetchCacheMux.Lock()
+		if userPrefetchCache == nil {
+			userPrefetchCache = make(map[string]*User)
+		}
+		userPrefetchCache[userId] = &user
+		userPrefetchCacheMux.Unlock()
+	}()
+}
+
+// getCachedUser retrieves user from cache or DB
+func getCachedUser(ctx context.Context, userId string) (*User, error) {
+	// Try cache first
+	userPrefetchCacheMux.RLock()
+	if cachedUser, ok := userPrefetchCache[userId]; ok {
+		userPrefetchCacheMux.RUnlock()
+		// Return a copy to avoid data races
+		userCopy := *cachedUser
+		return &userCopy, nil
+	}
+	userPrefetchCacheMux.RUnlock()
+	
+	// Not in cache, fetch from DB
+	var user User
+	err := usersColl.FindOne(ctx, bson.M{"username": userId}).Decode(&user)
+	if err != nil {
+		return nil, err
+	}
+	
+	// Update cache for next time
+	go func() {
+		userPrefetchCacheMux.Lock()
+		if userPrefetchCache == nil {
+			userPrefetchCache = make(map[string]*User)
+		}
+		userPrefetchCache[userId] = &user
+		userPrefetchCacheMux.Unlock()
+	}()
+	
+	return &user, nil
+}
+
+// invalidateUserCache removes user from cache after updates
+func invalidateUserCache(userId string) {
+	userPrefetchCacheMux.Lock()
+	delete(userPrefetchCache, userId)
+	userPrefetchCacheMux.Unlock()
+}
+
 func apiTestHandler(w http.ResponseWriter, _ *http.Request) {
 	w.Write([]byte("CTF API is up and running!"))
 }
@@ -81,21 +171,25 @@ func getLevelHandler(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	var user User
-	err := usersColl.FindOne(ctx, bson.M{"username": userId}).Decode(&user)
+	// Try to get user from cache first
+	user, err := getCachedUser(ctx, userId)
 	if err == mongo.ErrNoDocuments {
-		user = User{Username: userId, Score: 0, SolvedLevels: []int{}}
-		_, err = usersColl.InsertOne(ctx, user)
+		// Create new user
+		newUser := User{Username: userId, Score: 0, SolvedLevels: []int{}}
+		_, err = usersColl.InsertOne(ctx, newUser)
 		if err != nil {
 			http.Error(w, "failed to create user", http.StatusInternalServerError)
 			return
 		}
+		user = &newUser
+		// Cache the new user
+		prefetchUserData(userId)
 	} else if err != nil {
 		http.Error(w, "database error", http.StatusInternalServerError)
 		return
 	}
 
-	level := getCurrentLevelForUser(&user)
+	level := getCurrentLevelForUser(user)
 	json.NewEncoder(w).Encode(map[string]int{"level": level})
 }
 
@@ -116,56 +210,63 @@ func checkFlagHandler(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	// ensure user exists
-	var user User
-	err := usersColl.FindOne(ctx, bson.M{"username": body.UserId}).Decode(&user)
-	if err == mongo.ErrNoDocuments {
-		user = User{Username: body.UserId, Score: 0, SolvedLevels: []int{}}
-		_, err = usersColl.InsertOne(ctx, user)
-		if err != nil {
-			http.Error(w, "failed to create user", http.StatusInternalServerError)
-			return
-		}
-	} else if err != nil {
-		http.Error(w, "db error", http.StatusInternalServerError)
-		return
-	}
-
-	// find challenge by flag
-	var found map[string]interface{}
-	for _, c := range challenges {
-		if c["flag"] == body.Flag {
-			found = c
-			break
-		}
-	}
-
-	currentLevel := getCurrentLevelForUser(&user)
-	if found == nil {
+	// Use challenge lookup map for O(1) access
+	found, exists := challengeByFlag[body.Flag]
+	if !exists {
+		// Fetch user to get current level for incorrect flag response
+		user, _ := getCachedUser(ctx, body.UserId)
+		currentLevel := getCurrentLevelForUser(user)
 		json.NewEncoder(w).Encode(map[string]interface{}{"correct": false, "newLevel": currentLevel})
 		return
 	}
 
 	levelNum := int(found["level"].(int))
-	// if already solved
-	for _, lv := range user.SolvedLevels {
-		if lv == levelNum {
-			json.NewEncoder(w).Encode(map[string]interface{}{"correct": true, "newLevel": getCurrentLevelForUser(&user)})
-			return
-		}
+	points := int(found["points"].(int))
+
+	// Atomic update: only push level and increment score if level is not already present
+	// This prevents race conditions when multiple concurrent requests submit the same flag
+	filter := bson.M{
+		"username":     body.UserId,
+		"solvedLevels": bson.M{"$ne": levelNum}, // Only update if level NOT in array
 	}
+	update := bson.M{
+		"$push":        bson.M{"solvedLevels": levelNum},
+		"$inc":         bson.M{"score": points},
+		"$setOnInsert": bson.M{"username": body.UserId, "password": "", "solvedLevels": []int{}, "score": 0},
+	}
+	opts := options.Update().SetUpsert(true)
 
-	// update user: append level and add score
-	user.SolvedLevels = append(user.SolvedLevels, levelNum)
-	user.Score = user.Score + int(found["points"].(int))
-
-	_, err = usersColl.UpdateOne(ctx, bson.M{"username": body.UserId}, bson.M{"$set": bson.M{"solvedLevels": user.SolvedLevels, "score": user.Score}})
+	result, err := usersColl.UpdateOne(ctx, filter, update, opts)
 	if err != nil {
 		http.Error(w, "failed to update user", http.StatusInternalServerError)
 		return
 	}
 
-	json.NewEncoder(w).Encode(map[string]interface{}{"correct": true, "newLevel": getCurrentLevelForUser(&user)})
+	// Invalidate cache after update
+	invalidateUserCache(body.UserId)
+
+	// Fetch user after the update to return correct newLevel
+	var user User
+	err = usersColl.FindOne(ctx, bson.M{"username": body.UserId}).Decode(&user)
+	if err != nil && err != mongo.ErrNoDocuments {
+		http.Error(w, "db error", http.StatusInternalServerError)
+		return
+	}
+
+	newLevel := getCurrentLevelForUser(&user)
+
+	// If the flag was actually new (not a duplicate submission), prefetch next level data
+	if result.ModifiedCount > 0 {
+		// Asynchronously prefetch user data for the next request
+		go prefetchUserData(body.UserId)
+		
+		// Log successful flag submission for analytics
+		go func() {
+			log.Printf("User %s solved level %d, advancing to level %d", body.UserId, levelNum, newLevel)
+		}()
+	}
+
+	json.NewEncoder(w).Encode(map[string]interface{}{"correct": true, "newLevel": newLevel})
 }
 
 func resetUserHandler(w http.ResponseWriter, r *http.Request) {
@@ -189,6 +290,10 @@ func resetUserHandler(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "db error", http.StatusInternalServerError)
 		return
 	}
+	
+	// Invalidate cache after reset
+	invalidateUserCache(body.UserId)
+	
 	json.NewEncoder(w).Encode(map[string]bool{"success": true})
 }
 
@@ -214,6 +319,17 @@ func deleteUserHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 func leaderboardHandler(w http.ResponseWriter, r *http.Request) {
+	// Try to use cached leaderboard if it's fresh (< 10 seconds old)
+	leaderboardCacheMux.RLock()
+	if time.Since(leaderboardCacheTime) < 10*time.Second && leaderboardCache != nil {
+		cache := leaderboardCache
+		leaderboardCacheMux.RUnlock()
+		json.NewEncoder(w).Encode(cache)
+		return
+	}
+	leaderboardCacheMux.RUnlock()
+
+	// Cache is stale or empty, fetch from DB
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
@@ -233,6 +349,13 @@ func leaderboardHandler(w http.ResponseWriter, r *http.Request) {
 	for _, u := range users {
 		out = append(out, map[string]interface{}{"username": u.Username, "score": u.Score, "solvedLevels": u.SolvedLevels})
 	}
+
+	// Update cache
+	leaderboardCacheMux.Lock()
+	leaderboardCache = out
+	leaderboardCacheTime = time.Now()
+	leaderboardCacheMux.Unlock()
+
 	json.NewEncoder(w).Encode(out)
 }
 
@@ -255,6 +378,64 @@ func connectDB(uri string) (*mongo.Client, error) {
 	return cl, nil
 }
 
+// createIndexes creates database indexes for better query performance
+func createIndexes(ctx context.Context, coll *mongo.Collection) error {
+	indexes := []mongo.IndexModel{
+		{
+			Keys:    bson.D{{Key: "username", Value: 1}},
+			Options: options.Index().SetUnique(true),
+		},
+		{
+			Keys: bson.D{{Key: "score", Value: -1}},
+		},
+	}
+	_, err := coll.Indexes().CreateMany(ctx, indexes)
+	return err
+}
+
+// refreshLeaderboardCache periodically updates the leaderboard cache in the background
+func refreshLeaderboardCache(ctx context.Context, interval time.Duration) {
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			fetchCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			cursor, err := usersColl.Find(fetchCtx, bson.M{}, options.Find().SetSort(bson.M{"score": -1}).SetLimit(100))
+			if err != nil {
+				cancel()
+				log.Printf("failed to refresh leaderboard cache: %v", err)
+				continue
+			}
+
+			var users []User
+			if err := cursor.All(fetchCtx, &users); err != nil {
+				cursor.Close(fetchCtx)
+				cancel()
+				log.Printf("failed to decode leaderboard users: %v", err)
+				continue
+			}
+			cursor.Close(fetchCtx)
+			cancel()
+
+			out := make([]map[string]interface{}, 0, len(users))
+			for _, u := range users {
+				out = append(out, map[string]interface{}{"username": u.Username, "score": u.Score, "solvedLevels": u.SolvedLevels})
+			}
+
+			leaderboardCacheMux.Lock()
+			leaderboardCache = out
+			leaderboardCacheTime = time.Now()
+			leaderboardCacheMux.Unlock()
+
+			log.Printf("leaderboard cache refreshed with %d users", len(out))
+		}
+	}
+}
+
 func main() {
 	portStr := os.Getenv("PORT")
 	if portStr == "" {
@@ -273,6 +454,24 @@ func main() {
 	}
 	usersColl = client.Database("ctf_db").Collection("users")
 
+	// Create database indexes for better performance
+	idxCtx, idxCancel := context.WithTimeout(context.Background(), 30*time.Second)
+	if err := createIndexes(idxCtx, usersColl); err != nil {
+		log.Printf("warning: failed to create indexes: %v", err)
+	}
+	idxCancel()
+
+	// Initialize challenge lookup maps
+	initChallengeMaps()
+
+	// Context for graceful shutdown
+	shutdownCtx, shutdownCancel := context.WithCancel(context.Background())
+	defer shutdownCancel()
+
+	// Start background leaderboard cache refresh (every 5 seconds)
+	go refreshLeaderboardCache(shutdownCtx, 5*time.Second)
+	log.Println("background leaderboard cache refresh started")
+
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/test", apiTestHandler)
 	mux.HandleFunc("/getLevel", getLevelHandler)
@@ -284,8 +483,46 @@ func main() {
 
 	handler := withCORS(mux)
 	addr := ":" + strconv.Itoa(port)
-	log.Printf("listening on %s", addr)
-	if err := http.ListenAndServe(addr, handler); err != nil {
-		log.Fatalf("server failed: %v", err)
+	
+	server := &http.Server{
+		Addr:         addr,
+		Handler:      handler,
+		ReadTimeout:  15 * time.Second,
+		WriteTimeout: 15 * time.Second,
+		IdleTimeout:  60 * time.Second,
 	}
+
+	// Channel to listen for interrupt signals
+	stop := make(chan os.Signal, 1)
+	signal.Notify(stop, os.Interrupt, syscall.SIGTERM)
+
+	// Start server in a goroutine
+	go func() {
+		log.Printf("listening on %s", addr)
+		if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			log.Fatalf("server failed: %v", err)
+		}
+	}()
+
+	// Wait for interrupt signal
+	<-stop
+	log.Println("shutting down server gracefully...")
+
+	// Cancel background tasks
+	shutdownCancel()
+
+	// Graceful shutdown with timeout
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	if err := server.Shutdown(ctx); err != nil {
+		log.Printf("server shutdown error: %v", err)
+	}
+
+	// Disconnect from MongoDB
+	if err := client.Disconnect(ctx); err != nil {
+		log.Printf("mongodb disconnect error: %v", err)
+	}
+
+	log.Println("server stopped")
 }
