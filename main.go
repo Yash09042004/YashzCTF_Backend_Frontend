@@ -160,6 +160,41 @@ func apiTestHandler(w http.ResponseWriter, _ *http.Request) {
 	w.Write([]byte("CTF API is up and running!"))
 }
 
+func loginHandler(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		Username string `json:"username"`
+		Password string `json:"password"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		http.Error(w, "invalid json", http.StatusBadRequest)
+		return
+	}
+	if body.Username == "" || body.Password == "" {
+		http.Error(w, "username and password are required", http.StatusBadRequest)
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	var user User
+	err := usersColl.FindOne(ctx, bson.M{"username": body.Username}).Decode(&user)
+	if err == mongo.ErrNoDocuments {
+		json.NewEncoder(w).Encode(map[string]interface{}{"success": false, "message": "Invalid username or password"})
+		return
+	} else if err != nil {
+		http.Error(w, "database error", http.StatusInternalServerError)
+		return
+	}
+
+	if user.Password != body.Password {
+		json.NewEncoder(w).Encode(map[string]interface{}{"success": false, "message": "Invalid username or password"})
+		return
+	}
+
+	json.NewEncoder(w).Encode(map[string]interface{}{"success": true, "username": user.Username})
+}
+
 func getLevelHandler(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
 	userId := q.Get("userId")
@@ -474,6 +509,7 @@ func main() {
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/test", apiTestHandler)
+	mux.HandleFunc("/login", loginHandler)
 	mux.HandleFunc("/getLevel", getLevelHandler)
 	mux.HandleFunc("/checkFlag", checkFlagHandler)
 	mux.HandleFunc("/resetUser", resetUserHandler)
