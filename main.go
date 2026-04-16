@@ -258,20 +258,19 @@ func checkFlagHandler(w http.ResponseWriter, r *http.Request) {
 	levelNum := int(found["level"].(int))
 	points := int(found["points"].(int))
 
-	// Atomic update: only push level and increment score if level is not already present
-	// This prevents race conditions when multiple concurrent requests submit the same flag
+	// Only push level + add score if the user hasn't already solved this level.
+	// Use a plain UpdateOne (no upsert) to avoid operator conflicts between
+	// $push/$inc and $setOnInsert when the document doesn't exist yet.
 	filter := bson.M{
 		"username":     body.UserId,
-		"solvedLevels": bson.M{"$ne": levelNum}, // Only update if level NOT in array
+		"solvedLevels": bson.M{"$ne": levelNum},
 	}
 	update := bson.M{
-		"$push":        bson.M{"solvedLevels": levelNum},
-		"$inc":         bson.M{"score": points},
-		"$setOnInsert": bson.M{"username": body.UserId, "password": "", "solvedLevels": []int{}, "score": 0},
+		"$push": bson.M{"solvedLevels": levelNum},
+		"$inc":  bson.M{"score": points},
 	}
-	opts := options.Update().SetUpsert(true)
 
-	result, err := usersColl.UpdateOne(ctx, filter, update, opts)
+	result, err := usersColl.UpdateOne(ctx, filter, update)
 	if err != nil {
 		http.Error(w, "failed to update user", http.StatusInternalServerError)
 		return
