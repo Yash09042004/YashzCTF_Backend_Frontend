@@ -36,7 +36,7 @@ var (
 	challengeByFlag  map[string]map[string]interface{}
 	
 	challenges = []map[string]interface{}{
-		{"level": 1, "flag": "WLUG{PHTE4568}", "points": 100},
+		{"level": 1, "flag": "WLUG{ARYP1589}", "points": 100},
 		{"level": 2, "flag": "WLUG{ARYP1589}", "points": 150},
 		{"level": 3, "flag": "WLUG{HYGT5489}", "points": 200},
 		{"level": 4, "flag": "WLUG{AYVY2014}", "points": 250},
