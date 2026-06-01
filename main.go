@@ -36,16 +36,17 @@ var (
 	challengeByFlag  map[string]map[string]interface{}
 	
 	challenges = []map[string]interface{}{
-		{"level": 1, "flag": "WLUG{ARYP1589}", "points": 100},
-		{"level": 2, "flag": "WLUG{ARYP1589}", "points": 150},
-		{"level": 3, "flag": "WLUG{HYGT5489}", "points": 200},
-		{"level": 4, "flag": "WLUG{AYVY2014}", "points": 250},
-		{"level": 5, "flag": "WLUG{ASTK1230}", "points": 300},
-		{"level": 6, "flag": "WLUG{VIVA9563}", "points": 350},
-		{"level": 7, "flag": "WLUG{1721702}", "points": 400},
-		{"level": 8, "flag": "flag{web_2_0}", "points": 450},
-		{"level": 9, "flag": "flag{network_ninja}", "points": 500},
-		{"level": 10, "flag": "flag{ctf_mastery}", "points": 1000},
+		{"level": 1, "flag": "LHB{04fe3c1fe5bb0ea139ea7fb901a22d6d7f3b9b47c81acceef301e74a3faabce7}", "points": 100},
+		{"level": 2, "flag": "LHB{5dd38473cd50594976c0e10d0e3c3ac4ed8b3c786ea470e65ba503a9fb6fb75c}", "points": 150},
+		{"level": 3, "flag": "LHB{271604570707f29fb0cf997b6e087deddf13c1e0e3f1ec901659e4c7761f9c74}", "points": 200},
+		{"level": 4, "flag": "LHB{6a027ec88514a63dbf3a1e49738bc9bca289c0528ca8c6ef46738d05e747687b}", "points": 250},
+		{"level": 5, "flag": "LHB{f67f108082b5b58e939b1685601dd85189cca05b50693e91aff9197692c31a5b}", "points": 300},
+		{"level": 6, "flag": "LHB{48a3f89e2c65d1f97b4d1c9e3a7f8c2b1d4e6f9a0c3b2d5e8f1a4c7b9e0d3f2a}", "points": 350},
+		{"level": 7, "flag": "LHB{d7e00f8305d7fdd25f417d6a51dbf5277f76bc258deecfbd386b698dd26e6e89}", "points": 400},
+		{"level": 8, "flag": "LHB{5c96acb922f4d4ee11fa6d51465fcee0e8fc008be7626aedd1dc66c8c11e6d52}", "points": 450},
+		{"level": 9, "flag": "LHB{51ba32e8e89bf381402c4482b782669b9363371d078cf33e9e53c09af78be316}", "points": 500},
+		{"level": 10, "flag": "LHB{ff4d64a95e31ee49d5412acd9f5d6df7efe9d575fad77700a98698be24d1752f}", "points": 600},
+		
 	}
 )
 
